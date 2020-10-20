@@ -1,3 +1,4 @@
+const vm     = require('vm');
 const stream = require('stream');
 const Buffer = require('buffer').Buffer;
 const repl = require('repl');
@@ -5,10 +6,8 @@ const pkg = require('./package.json');
 const crypto = require('crypto');
 const util = require('./util.js');
 const { readNumpyFile, writeNumpyFile, buildDataArray } = require('npy-js');
-
 const magicNumber = crypto.randomBytes(128).toString('hex');
-const magicNumberCommandBytes = Buffer.from( `console.log( '${magicNumber}' );\r\n` , 'utf8');
-
+const magicNumberCommandBytes = Buffer.from( `\n\nconsole.log( '${magicNumber}' );\r\n` , 'utf8');
 
 
 
@@ -112,26 +111,68 @@ const startRepl = function(instream, outstream) {
 
   var outReplStream = new stream.Transform();
   outReplStream._transform = function (chunk, encoding, done){
-    if (!chunk.includes(magicNumber)){
-      this.push(chunk);
-    }else{
-      const obj = { _pixiedust: true, type: 'done' };
-      outstream.write('\n' + JSON.stringify(obj) + '\n');
-    }
+    this.push(chunk);
     done();
   };
 
   var inReplStream = new stream.Transform();
   inReplStream._transform = function (chunk, encoding, done){
+    if (typeof recoveryCMD !== 'undefined'){
+      recoveryCMD = '';
+      inRecovery = false;
+    }
     chunk = Buffer.concat([chunk, magicNumberCommandBytes]);
     this.push(chunk);
     done();
   };
 
+  var inRecovery = false;
+  var recoveryCMD = '';
+  async function replEval(cmd, context, filename, callback){
+    if (cmd.includes(magicNumber.toString('utf-8'))){
+      let resultFunc = async function(){
+        try{
+          let r = await vm.runInContext(recoveryCMD, context);
+        }catch(err){
+          throw err;
+        }
+        return r;
+      };
+      var result;
+      resultFunc().then((res)=>{
+        result = res;
+      }).catch((e)=>{
+        console.log("Problem evaluating node context.");
+        console.log(e);
+      }).finally(()=>{
+        recoveryCMD = '';
+        inRecovery  = false;
+        globalVariableChecker().catch((err)=>{
+          console.log(err);
+        }).finally(()=>{
+          const obj   = { _pixiedust: true, type: 'done' };
+          outstream.write('\n' + JSON.stringify(obj) + '\n');
+          callback(null, undefined);//result)
+        });
+      });
+    }else{
+      recoveryCMD += cmd;
+      callback(null, undefined);
+    };
+  };
+
+  function isRecoverableError(error) {
+    if (error.name === 'SyntaxError') {
+      return /^(Unexpected end of input|Unexpected token)/.test(error.message);
+    }
+    return false;
+  }
+
   const options = {
     input: inReplStream,
     output: outReplStream,
     prompt: '',
+    eval: replEval,
     writer: writer
   };
 
@@ -141,7 +182,7 @@ const startRepl = function(instream, outstream) {
 
   var outTripStream = new stream.Transform();
   outTripStream._transform = function (chunk, encoding, done){
-    globalVariableChecker();
+//    globalVariableChecker();
     this.push(chunk);
     done();
     return;
